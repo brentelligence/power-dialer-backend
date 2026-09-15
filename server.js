@@ -2,6 +2,8 @@ import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
 import twilio from 'twilio';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, addDoc } from 'firebase/firestore';
 
 dotenv.config();
 
@@ -11,6 +13,40 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Twilio sends urlencoded requests
 
 const port = process.env.PORT || 3001;
+
+// Firebase Firestore setup
+const firebaseConfig = {
+  apiKey: "AIzaSyAgyRxp44gqvaSUHqkaUX_HWRgHpCQVNew",
+  authDomain: "power-dialer-5aef5.firebaseapp.com",
+  projectId: "power-dialer-5aef5",
+  storageBucket: "power-dialer-5aef5.firebasestorage.app",
+  messagingSenderId: "36464616552",
+  appId: "1:36464616552:web:6ff3e028e172e5647247dd",
+  measurementId: "G-TEZPQPDKM3"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+// Webhook endpoint for Zapier to push leads directly without OAuth issues
+app.post('/api/leads', async (req, res) => {
+  try {
+    const { name, phone, property, status } = req.body;
+    console.log('Incoming lead from webhook:', req.body);
+    const docRef = await addDoc(collection(db, 'leads'), {
+      name: name || 'Unknown Lead',
+      phone: phone || '',
+      property: property || 'No Address',
+      status: status || 'New Lead',
+      createdAt: new Date().toISOString()
+    });
+    console.log('Lead created in Firestore with ID:', docRef.id);
+    res.status(200).json({ success: true, id: docRef.id });
+  } catch (err) {
+    console.error('Error writing lead to Firestore:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // You need to set these in your .env file
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
@@ -23,18 +59,28 @@ app.post('/voice', (req, res) => {
   const response = new twilio.twiml.VoiceResponse();
 
   if (to) {
-    // Generate TwiML that initiates the call and enables AMD
-    const dial = response.dial();
+    let formattedTo = String(to).replace(/\D/g, '');
+    if (formattedTo.length === 10) formattedTo = '+1' + formattedTo;
+    else if (formattedTo.length === 11 && formattedTo.startsWith('1')) formattedTo = '+' + formattedTo;
+    else formattedTo = to;
+
+    const callerId = req.body.CallerId || req.body.From || process.env.TWILIO_CALLER_ID || process.env.TWILIO_PHONE_NUMBER || '+14195744224';
+    const dialOptions = {
+      callerId: callerId,
+      answerOnBridge: true
+    };
+
+    const dial = response.dial(dialOptions);
     dial.number({
       machineDetection: 'Enable',
-      amdStatusCallback: '/amd-callback',
+      amdStatusCallback: 'https://power-dialer-backend.onrender.com/amd-callback',
       amdStatusCallbackMethod: 'POST'
-    }, to);
+    }, formattedTo);
   } else {
     response.say('No phone number provided.');
   }
 
-  console.log('Generated TwiML for Outbound Call with AMD');
+  console.log('Generated TwiML for Outbound Call to:', to);
   res.set('Content-Type', 'text/xml');
   res.send(response.toString());
 });
